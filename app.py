@@ -2,12 +2,11 @@
 import os, io, requests, psycopg2, traceback
 from flask import Flask, request, jsonify
 from PIL import Image
-from urllib.parse import urlparse
 
 app = Flask(__name__)
 
 DB_DSN = os.environ.get("DB_DSN")
-APPSHEET_KEY = os.environ.get("APPSHEET_ACCESS_KEY")  # NEW
+APPSHEET_KEY = os.environ.get("APPSHEET_ACCESS_KEY", "")
 
 def predict_damage(img):
     g = img.convert("L").resize((256, 256))
@@ -21,62 +20,42 @@ def health():
 @app.post("/predict-photo")
 def predict_photo():
     try:
+        # (A) verifikasi request dari AppSheet (opsional tapi disarankan)
+        client_key = request.headers.get("ApplicationAccessKey", "")
+        if APPSHEET_KEY and client_key != APPSHEET_KEY:
+            return jsonify({"error": "unauthorized"}), 401
+
         data = request.get_json(force=True) or {}
         row_id  = data.get("row_id")
         foto_url = data.get("foto_url")
 
-        print("[predict-photo] payload:", data)
-
         if not row_id or not foto_url:
             return jsonify({"error": "row_id & foto_url required"}), 400
 
-        # ------------ 1) Unduh gambar dengan ApplicationAccessKey ------------
-        try:
-            headers = {}
-            host = urlparse(foto_url).hostname or ""
-            # URL dari GetTableFileUrl milik AppSheet butuh ApplicationAccessKey
-            if "appsheet" in host.lower():
-                if not APPSHEET_KEY:
-                    return jsonify({"error": "APPSHEET_ACCESS_KEY is missing on server"}), 500
-                headers["ApplicationAccessKey"] = APPSHEET_KEY
+        # (B) Unduh gambar dari AppSheet (butuh header khusus)
+        headers = {"ApplicationAccessKey": APPSHEET_KEY} if APPSHEET_KEY else {}
+        r = requests.get(foto_url, headers=headers, timeout=25)
+        r.raise_for_status()
 
-            r = requests.get(foto_url, headers=headers, timeout=30)
-            print("[download] status:", r.status_code, "len:", len(r.content))
-            r.raise_for_status()
-        except Exception as e:
-            print("[download] error:", repr(e))
-            return jsonify({"error": f"cannot download foto_url: {e}"}), 400
+        img = Image.open(io.BytesIO(r.content)).convert("RGB")
 
-        # ------------ 2) Buka image ------------
-        try:
-            img = Image.open(io.BytesIO(r.content)).convert("RGB")
-        except Exception as e:
-            print("[image] error:", repr(e))
-            return jsonify({"error": f"invalid image content: {e}"}), 400
-
-        # ------------ 3) Prediksi ------------
+        # (C) Prediksi sederhana
         label = predict_damage(img)
-        print("[predict] label:", label)
 
-        # ------------ 4) Update DB ------------
-        try:
-            conn = psycopg2.connect(DB_DSN)
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute("""
-                    update smart.hasil_investigasi_trafo
-                       set hasil_cek_foto = %s, updated_at = now()
-                     where id = %s
-                """, (label, row_id))
-                print("[db] rowcount:", cur.rowcount)
-            conn.close()
-        except Exception as e:
-            print("[db] error:", repr(e))
-            return jsonify({"error": f"db error: {e}"}), 500
+        # (D) Update ke Neon
+        conn = psycopg2.connect(DB_DSN)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                update smart.hasil_investigasi_trafo
+                   set hasil_cek_foto = %s, updated_at = now()
+                 where id = %s
+            """, (label, row_id))
+        conn.close()
 
         return jsonify({"row_id": row_id, "hasil_cek_foto": label}), 200
 
     except Exception as e:
-        print("[predict-photo] unexpected:", repr(e))
+        print("[predict-photo] error:", repr(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
