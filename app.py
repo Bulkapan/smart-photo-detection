@@ -2,10 +2,12 @@
 import os, io, requests, psycopg2, traceback
 from flask import Flask, request, jsonify
 from PIL import Image
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
 DB_DSN = os.environ.get("DB_DSN")
+APPSHEET_KEY = os.environ.get("APPSHEET_ACCESS_KEY")  # NEW
 
 def predict_damage(img):
     g = img.convert("L").resize((256, 256))
@@ -28,27 +30,35 @@ def predict_photo():
         if not row_id or not foto_url:
             return jsonify({"error": "row_id & foto_url required"}), 400
 
-        # 1) Coba unduh gambar
+        # ------------ 1) Unduh gambar dengan ApplicationAccessKey ------------
         try:
-            r = requests.get(foto_url, timeout=20)
+            headers = {}
+            host = urlparse(foto_url).hostname or ""
+            # URL dari GetTableFileUrl milik AppSheet butuh ApplicationAccessKey
+            if "appsheet" in host.lower():
+                if not APPSHEET_KEY:
+                    return jsonify({"error": "APPSHEET_ACCESS_KEY is missing on server"}), 500
+                headers["ApplicationAccessKey"] = APPSHEET_KEY
+
+            r = requests.get(foto_url, headers=headers, timeout=30)
             print("[download] status:", r.status_code, "len:", len(r.content))
             r.raise_for_status()
         except Exception as e:
             print("[download] error:", repr(e))
             return jsonify({"error": f"cannot download foto_url: {e}"}), 400
 
-        # 2) Buka image
+        # ------------ 2) Buka image ------------
         try:
             img = Image.open(io.BytesIO(r.content)).convert("RGB")
         except Exception as e:
             print("[image] error:", repr(e))
             return jsonify({"error": f"invalid image content: {e}"}), 400
 
-        # 3) Prediksi
+        # ------------ 3) Prediksi ------------
         label = predict_damage(img)
         print("[predict] label:", label)
 
-        # 4) Update DB
+        # ------------ 4) Update DB ------------
         try:
             conn = psycopg2.connect(DB_DSN)
             conn.autocommit = True
