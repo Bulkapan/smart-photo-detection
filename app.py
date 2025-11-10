@@ -20,7 +20,7 @@ def health():
 @app.post("/predict-photo")
 def predict_photo():
     try:
-        # (A) verifikasi request dari AppSheet (opsional tapi disarankan)
+        # (A) verifikasi request dari App
         client_key = request.headers.get("ApplicationAccessKey", "")
         if APPSHEET_KEY and client_key != APPSHEET_KEY:
             return jsonify({"error": "unauthorized"}), 401
@@ -32,14 +32,14 @@ def predict_photo():
         if not row_id or not foto_url:
             return jsonify({"error": "row_id & foto_url required"}), 400
 
-        # (B) Unduh gambar dari AppSheet (butuh header khusus)
+        # (B) Ambil gambar dari App
         headers = {"ApplicationAccessKey": APPSHEET_KEY} if APPSHEET_KEY else {}
         r = requests.get(foto_url, headers=headers, timeout=25)
         r.raise_for_status()
 
         img = Image.open(io.BytesIO(r.content)).convert("RGB")
 
-        # (C) Prediksi sederhana
+        # (C) Prediksi
         label = predict_damage(img)
 
         # (D) Update ke Neon
@@ -59,3 +59,4 @@ def predict_photo():
         print("[predict-photo] error:", repr(e))
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
